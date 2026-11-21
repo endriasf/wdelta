@@ -17,7 +17,7 @@ pip install ./python[hub]
 ```
 
 On Windows, copy `target\release\wdelta.exe` instead. Without the `[hub]` extra, base
-models are downloaded over plain HTTPS. Tested on Linux; macOS and Windows are untested.
+models are downloaded over plain HTTPS. Tested on every push on macOS (Apple Silicon and Intel), Windows and Linux.
 
 ## Use
 
