@@ -1,0 +1,7 @@
+/target/
+__pycache__/
+*.egg-info/
+/build/
+python/wdelta/bin/
+*.wdz
+!tests/golden/*.wdz

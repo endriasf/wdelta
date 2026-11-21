@@ -1,0 +1,3 @@
+# golden test files must stay byte-exact on every OS
+tests/golden/* binary
+*.sh text eol=lf

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wdelta"
+version = "0.3.0"
+description = "Lossless delta compression for fine-tuned models (safetensors)"
+requires-python = ">=3.9"
+readme = "README.md"
+optional-dependencies = { hub = ["huggingface_hub>=0.20"] }
+
+[project.scripts]
+wdelta-model = "wdelta.__main__:main"
+
+[tool.setuptools]
+packages = ["wdelta"]
+
+[tool.setuptools.package-data]
+wdelta = ["bin/wdelta", "bin/wdelta.exe"]

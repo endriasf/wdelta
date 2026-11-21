@@ -1,0 +1,53 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "macOS (Apple Silicon)", os: macos-latest }
+          - { name: "macOS (Intel)",         os: macos-15-intel }
+          - { name: "Windows",               os: windows-latest }
+          - { name: "Linux",                 os: ubuntu-latest }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Platform
+        run: |
+          uname -a
+          rustc -vV
+          python -V
+
+      - name: Build and install the Python package (as the README describes)
+        run: |
+          cargo build --release
+          mkdir -p python/wdelta/bin
+          if [ -f target/release/wdelta.exe ]; then cp target/release/wdelta.exe python/wdelta/bin/; else cp target/release/wdelta python/wdelta/bin/; fi
+          python -m pip install --upgrade pip
+          python -m pip install numpy pytest ./python
+
+      - name: Installed package finds its bundled binary
+        run: |
+          cd "$RUNNER_TEMP"
+          python -c "import wdelta; b = wdelta._binary(); print('bundled binary:', b); assert 'site-packages' in b"
+          wdelta-model --help > /dev/null
+
+      - name: Run all tests
+        run: PYTHON=python ./run_tests.sh
