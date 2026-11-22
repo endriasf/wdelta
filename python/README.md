@@ -45,6 +45,8 @@ byte-for-byte.
 - **Prove where a file came from.** The hashes detect corruption and a wrong base. They are not
   signatures: anyone can build a valid `.wdz` of a different model. Trust a packed model only as
   much as you trust its source.
+- **Vouch for untested model types.** Testing covered dense transformer LLMs (Qwen3, Mistral,
+  Llama 3.1, 7B–70B). Mixture-of-experts, vision, speech and diffusion models are untested.
 - **Match zstd's speed.** Decoding runs at about 220–240 MB/s on 2 CPU cores, slower than
   general-purpose decompressors that skip entropy modelling.
 
