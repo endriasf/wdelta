@@ -63,16 +63,20 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
-      - name: Create the GitHub release
+      - name: Create the GitHub release (or add the files to it if it already exists)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "wdelta $GITHUB_REF_NAME" \
-            --prerelease \
-            --notes "Experimental release. The file format may change before 1.0.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "wdelta $GITHUB_REF_NAME" \
+              --prerelease \
+              --notes "Experimental release. The file format may change before 1.0.
 
           Prebuilt \`wdelta\` command-line codec for macOS (Apple Silicon and Intel), Windows x64 and Linux x64. All tests passed on every platform before these were built. Verify downloads against SHA256SUMS.txt.
 
           The Python package (whole-model pack/unpack, from_pretrained) installs from source; see the README."
+          fi
