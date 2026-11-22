@@ -25,6 +25,12 @@ def main(argv=None):
         m = pack(a.finetune, a.base, a.out, base_id=a.base_id)
         print(f"packed {len(m['shards'])} shards: {m['bytes'] / 1e9:.2f} GB -> {m['packed_bytes'] / 1e9:.2f} GB "
               f"({100 * m['packed_bytes'] / m['bytes']:.1f}%), base {m['base']['repo']}@{(m['base']['revision'] or '')[:10]}")
+        extras = m.get("extras", [])
+        if extras:
+            print(f"copied {len(extras)} other files uncompressed: {m['extra_bytes'] / 1e9:.2f} GB")
+            for e in sorted(extras, key=lambda e: -e["bytes"])[:5]:
+                if e["bytes"] >= 100 << 20:
+                    print(f"  {e['file']}: {e['bytes'] / 1e9:.2f} GB (not compressed; only safetensors weights are)")
     elif a.cmd == "unpack":
         print(f"unpacked to {unpack(a.packed, a.out, base=a.base)}")
     else:

@@ -50,10 +50,11 @@ byte-for-byte.
 - **Match zstd's speed.** Decoding runs at about 220–240 MB/s on 2 CPU cores, well below
   general-purpose decompressors such as zstd, which typically decode at over 1 GB/s.
 
-Whole-model packing (`wdelta-model pack`) only handles `*.safetensors` files in the model's
-top-level folder. Files ending in `.bin`, `.pt` or `.pth` (for example `pytorch_model.bin`
-duplicates, or `training_args.bin`) and safetensors files in subfolders are **not** included in
-the packed model. Check the list of files in `wdelta.json` before deleting an original.
+Whole-model packing (`wdelta-model pack`) compresses every `*.safetensors` file in the model
+folder and its subfolders, and copies every other file (`.bin`, `.pt`, `.onnx`, config,
+tokenizer, ...) **without compression**, so a repo that also ships `pytorch_model.bin` copies of
+its weights will pack to a much larger size. The command lists any large uncompressed files.
+Hidden files and folders (names starting with `.`, such as `.gitattributes`) are not packed.
 
 ## How well it works
 
@@ -245,10 +246,12 @@ wrong or modified base is rejected instead of producing a different model. Gated
 
 ## What a packed model contains
 
-- `*.safetensors.wdz`: one compressed file per weight shard
-- the original's other files (config, tokenizer, generation config, ...), except `.bin`, `.pt`
-  and `.pth` files
-- `wdelta.json`: the base model's repo id and commit, and the size and SHA-256 of each shard
+- `*.safetensors.wdz`: one compressed file per safetensors file, at the same path. A file in a
+  subfolder (for example `unet/`) is coded against the same subfolder of the base when the
+  base has one, otherwise against the base's top-level weights.
+- every other file of the original, copied as-is (config, tokenizer, `.bin` files, ...)
+- `wdelta.json`: the base model's repo id and commit, and the size and SHA-256 of every file.
+  Unpacking checks all of them.
 
 ## Testing
 

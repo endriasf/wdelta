@@ -1,10 +1,11 @@
 """
 wdelta — lossless delta compression for fine-tuned models.
 
-A packed model is a folder holding one ``.wdz`` file per weight shard, the model's
-non-weight files (config, tokenizer, ...) and a ``wdelta.json`` manifest naming the
-base model (Hugging Face repo id + exact commit). Unpacking downloads that base if
-needed and restores every shard byte-for-byte (each shard's SHA-256 is checked).
+A packed model is a folder holding one ``.wdz`` file per safetensors shard, every other
+file of the model copied as-is (config, tokenizer, ``.bin`` files, ...) and a
+``wdelta.json`` manifest naming the base model (Hugging Face repo id + exact commit) and
+the SHA-256 of every file. Unpacking downloads that base if needed and restores every
+file byte-for-byte. Hidden files and folders (names starting with ".") are not packed.
 
     import wdelta
     wdelta.pack("my-org/my-finetune", base="meta-llama/Llama-3.1-8B-Instruct", out="packed/")
@@ -23,7 +24,7 @@ from pathlib import Path
 
 from . import hub
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 FORMAT = "wdelta-packed-v1"
 MANIFEST = "wdelta.json"
 CACHE = Path(os.environ.get("WDELTA_CACHE", Path.home() / ".cache" / "wdelta"))
@@ -62,17 +63,20 @@ def _resolve(spec: str, kind: str, patterns=None, revision: str | None = None) -
     return local, repo, commit
 
 
-def _copy_extras(src: Path, dst: Path, skip: set[str]) -> list[str]:
-    """Copy every non-weight file (config, tokenizer, index, README...) from src to dst."""
-    copied = []
-    for f in sorted(src.rglob("*")):
-        rel = f.relative_to(src)
-        if not f.is_file() or rel.parts[0].startswith(".") or f.name in skip or f.suffix in (WEIGHT_EXT, ".wdz", ".bin", ".pt", ".pth"):
-            continue
-        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, dst / rel)
-        copied.append(str(rel))
-    return copied
+def _model_files(src: Path) -> list[Path]:
+    """Every file of a model folder, as paths relative to it. Hidden files and folders (names
+    starting with ".", such as download caches and .gitattributes) are left out."""
+    return sorted(f.relative_to(src) for f in src.rglob("*")
+                  if f.is_file() and not any(part.startswith(".") for part in f.relative_to(src).parts))
+
+
+def _base_dir_for(b_dir: Path, rel: Path) -> str:
+    """The base folder (relative to b_dir) whose tensors a shard at `rel` is coded against:
+    the matching subfolder of the base if it holds safetensors files, else the base's top level."""
+    sub = rel.parent
+    if sub != Path(".") and any((b_dir / sub).glob("*" + WEIGHT_EXT)):
+        return sub.as_posix()
+    return ""
 
 
 def _sha256(path: Path) -> str:
@@ -99,23 +103,40 @@ def pack(finetune: str, base: str, out: str, base_id: str | None = None, base_re
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, WDELTA_BASE_ID=label)
+    files = _model_files(ft_dir)
     shards, total_in, total_out = [], 0, 0
-    for f in sorted(ft_dir.glob("*" + WEIGHT_EXT)):
-        wdz = out_dir / (f.name + ".wdz")
-        _run("encode", str(b_dir), str(f), str(wdz), env=env)
-        shards.append({"file": f.name, "wdz": wdz.name, "bytes": f.stat().st_size,
-                       "wdz_bytes": wdz.stat().st_size, "sha256": _sha256(f)})
+    for rel in files:
+        if rel.suffix != WEIGHT_EXT or rel.name == MANIFEST:
+            continue
+        f = ft_dir / rel
+        wdz = out_dir / rel.with_name(rel.name + ".wdz")
+        wdz.parent.mkdir(parents=True, exist_ok=True)
+        bsub = _base_dir_for(b_dir, rel)
+        _run("encode", str(b_dir / bsub), str(f), str(wdz), env=env)
+        shards.append({"file": rel.as_posix(), "wdz": wdz.relative_to(out_dir).as_posix(), "base_dir": bsub,
+                       "bytes": f.stat().st_size, "wdz_bytes": wdz.stat().st_size, "sha256": _sha256(f)})
         total_in += f.stat().st_size
         total_out += wdz.stat().st_size
     if not shards:
         raise ValueError(f"no {WEIGHT_EXT} files in {ft_dir}")
-    extras = _copy_extras(ft_dir, out_dir, skip={MANIFEST})
+    # every other file is copied as-is, with its hash, so unpack restores the complete folder
+    coded = {s["file"] for s in shards}
+    outputs = {s["wdz"] for s in shards}
+    extras = []
+    for rel in files:
+        if rel.as_posix() in coded or rel.name == MANIFEST:
+            continue
+        if rel.as_posix() in outputs:
+            raise ValueError(f"{rel}: name clashes with a compressed shard; rename it before packing")
+        (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ft_dir / rel, out_dir / rel)
+        extras.append({"file": rel.as_posix(), "bytes": (ft_dir / rel).stat().st_size, "sha256": _sha256(ft_dir / rel)})
     manifest = {
         "format": FORMAT, "wdelta_version": __version__,
         "base": {"repo": label, "revision": b_commit or base_revision},
         "source": {"repo": ft_repo, "revision": ft_commit},
-        "shards": shards, "extra_files": extras,
-        "bytes": total_in, "packed_bytes": total_out,
+        "shards": shards, "extra_files": [e["file"] for e in extras], "extras": extras,
+        "bytes": total_in, "packed_bytes": total_out, "extra_bytes": sum(e["bytes"] for e in extras),
     }
     (out_dir / MANIFEST).write_text(json.dumps(manifest, indent=2))
     return manifest
@@ -155,8 +176,17 @@ def unpack(packed: str, out: str, base: str | None = None) -> Path:
     tmp = Path(tempfile.mkdtemp(prefix=".wdelta-", dir=out_dir.parent))  # same filesystem, so the final rename is atomic
     try:
         for s in m["shards"]:
-            _run("decode", str(b_dir), str(p_dir / s["wdz"]), str(tmp / s["file"]))  # checks SHA-256 internally
-        _copy_extras(p_dir, tmp, skip={MANIFEST})
+            dst = tmp / s["file"]
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            _run("decode", str(b_dir / s.get("base_dir", "")), str(p_dir / s["wdz"]), str(dst))  # checks SHA-256 internally
+        for e in m.get("extras") or [{"file": f} for f in m.get("extra_files", [])]:
+            src, dst = p_dir / e["file"], tmp / e["file"]
+            if not src.is_file():
+                raise FileNotFoundError(f"{src}: listed in {MANIFEST} but missing from the packed model")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            if "sha256" in e and _sha256(dst) != e["sha256"]:
+                raise ValueError(f"{e['file']}: SHA-256 does not match the one recorded at pack time")
         out_dir.parent.mkdir(parents=True, exist_ok=True)
         if out_dir.exists():
             shutil.rmtree(out_dir)

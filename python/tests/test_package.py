@@ -57,18 +57,92 @@ def models(tmp_path, monkeypatch):
     (ft / "tokenizer.json").write_text('{"version": "1.0"}')
     (ft / "sub").mkdir()
     (ft / "sub" / "notes.txt").write_text("nested file")
+    # files that are not top-level safetensors must survive too
+    (ft / "training_args.bin").write_bytes(rng.bytes(3000))
+    (ft / "pytorch_model.bin").write_bytes(rng.bytes(5000))
+    (ft / "optimizer.pt").write_bytes(rng.bytes(700))
+    (ft / "extra.pth").write_bytes(rng.bytes(300))
+    # a component in a subfolder that the base also has (coded against base/unet) ...
+    for d, scale in ((base, 0), (ft, 1e-4)):
+        (d / "unet").mkdir()
+        u = np.linspace(-1, 1, 4096, dtype=np.float32)
+        write_st(d / "unet" / "diffusion.safetensors", {"l1.w": ("BF16", bf16(u + scale))})
+    # ... and one the base doesn't have (coded without a base)
+    (ft / "vision").mkdir()
+    write_st(ft / "vision" / "model.safetensors", {"v.w": ("BF16", bf16(rng.standard_normal(4096)))})
+    (ft / ".gitattributes").write_text("hidden: not packed")
     return base, ft, tmp_path
+
+
+def visible_files(d):
+    return sorted(f.relative_to(d) for f in Path(d).rglob("*")
+                  if f.is_file() and not any(p.startswith(".") for p in f.relative_to(d).parts))
 
 
 def test_pack_unpack_round_trip_is_byte_identical(models):
     base, ft, tmp = models
     m = wdelta.pack(str(ft), str(base), str(tmp / "packed"), base_id="test/base")
-    assert m["base"]["repo"] == "test/base" and len(m["shards"]) == 2
+    assert m["base"]["repo"] == "test/base" and len(m["shards"]) == 4
     assert m["packed_bytes"] < m["bytes"]
     out = wdelta.unpack(str(tmp / "packed"), str(tmp / "restored"), base=str(base))
-    for f in ft.rglob("*"):
-        if f.is_file():
-            assert sha(f) == sha(out / f.relative_to(ft)), f"{f.name} differs"
+    # every visible file comes back, byte-identical, and nothing else appears
+    assert visible_files(out) == visible_files(ft)
+    for rel in visible_files(ft):
+        assert sha(ft / rel) == sha(out / rel), f"{rel} differs"
+    assert not (out / ".gitattributes").exists()
+
+
+def test_subfolder_shards_use_the_matching_base_subfolder(models):
+    base, ft, tmp = models
+    m = wdelta.pack(str(ft), str(base), str(tmp / "packed"))
+    by_file = {s["file"]: s for s in m["shards"]}
+    assert by_file["unet/diffusion.safetensors"]["base_dir"] == "unet"
+    assert by_file["vision/model.safetensors"]["base_dir"] == ""
+    assert by_file["model-00001-of-00002.safetensors"]["base_dir"] == ""
+    assert (tmp / "packed" / "unet" / "diffusion.safetensors.wdz").exists()
+
+
+def test_other_files_are_copied_with_hashes(models):
+    base, ft, tmp = models
+    m = wdelta.pack(str(ft), str(base), str(tmp / "packed"))
+    extras = {e["file"]: e for e in m["extras"]}
+    for name in ("training_args.bin", "pytorch_model.bin", "optimizer.pt", "extra.pth",
+                 "config.json", "tokenizer.json", "sub/notes.txt"):
+        assert extras[name]["sha256"] == sha(ft / name), name
+    assert m["extra_bytes"] == sum(e["bytes"] for e in m["extras"])
+    assert ".gitattributes" not in extras
+
+
+def test_damaged_extra_file_is_rejected(models):
+    base, ft, tmp = models
+    wdelta.pack(str(ft), str(base), str(tmp / "packed"))
+    (tmp / "packed" / "training_args.bin").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="training_args.bin"):
+        wdelta.unpack(str(tmp / "packed"), str(tmp / "restored"), base=str(base))
+    assert not (tmp / "restored").exists()
+
+
+def test_missing_extra_file_is_rejected(models):
+    base, ft, tmp = models
+    wdelta.pack(str(ft), str(base), str(tmp / "packed"))
+    (tmp / "packed" / "optimizer.pt").unlink()
+    with pytest.raises(FileNotFoundError, match="optimizer.pt"):
+        wdelta.unpack(str(tmp / "packed"), str(tmp / "restored"), base=str(base))
+    assert not (tmp / "restored").exists()
+
+
+def test_older_manifest_without_extra_hashes_still_unpacks(models):
+    base, ft, tmp = models
+    wdelta.pack(str(ft), str(base), str(tmp / "packed"))
+    mf = tmp / "packed" / "wdelta.json"
+    m = json.loads(mf.read_text())
+    del m["extras"], m["extra_bytes"]
+    for s in m["shards"]:
+        del s["base_dir"]
+    m["shards"] = [s for s in m["shards"] if "/" not in s["file"]]
+    mf.write_text(json.dumps(m))
+    out = wdelta.unpack(str(tmp / "packed"), str(tmp / "restored"), base=str(base))
+    assert sha(out / "training_args.bin") == sha(ft / "training_args.bin")
 
 
 def test_manifest_records_shard_hashes(models):
@@ -125,7 +199,7 @@ def test_command_line(models, capsys):
     main(["unpack", str(tmp / "packed"), "-o", str(tmp / "restored"), "--base", str(base)])
     main(["info", str(tmp / "packed")])
     out = capsys.readouterr().out
-    assert "packed 2 shards" in out and "unpacked to" in out and '"test/base"' in out
+    assert "packed 4 shards" in out and "other files uncompressed" in out and "unpacked to" in out and '"test/base"' in out
     assert sha(tmp / "restored" / "model-00002-of-00002.safetensors") == sha(ft / "model-00002-of-00002.safetensors")
 
 
