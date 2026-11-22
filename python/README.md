@@ -10,6 +10,49 @@ byte-for-byte.
 > original files until you have verified a restore, and don't use it as your only copy of
 > anything you need to keep long term.
 
+## What it can and cannot do
+
+**It can:**
+
+- Shrink a fine-tuned model to 5–54% of its size (bf16 safetensors, tested on 10 fine-tunes
+  from 4 base models), when the base model it was fine-tuned from is available.
+- Restore the fine-tune bit-for-bit. Nothing is approximated: every restored shard is checked
+  against the SHA-256 of the original.
+- Compress bf16 weights without a base model, to about 66.5%. That matches single-model tools
+  such as ZipNN and DFloat11; it does not beat them.
+- Pin the exact base: the packed model records the base's Hub repo and commit, plus a hash of
+  every base tensor it uses, so a wrong or modified base is rejected instead of producing a
+  different model.
+- Pack and restore whole Hugging Face models (weights, config, tokenizer), download the base
+  automatically, and hand the restored folder to `transformers`.
+
+**It cannot:**
+
+- **Help much without the right base.** Savings come from the base model. A model trained from
+  scratch, or compared against the wrong base, gets the ~66.5% base-less result at best.
+- **Promise a fixed ratio.** The result depends on how far the fine-tune moved from its base:
+  5.3% for a light security fine-tune (MetaSecAlign), 53% for Mistral-7B-Instruct-v0.1. The more the training
+  changed the weights, the less there is to gain.
+- **Make downloads smaller if you don't already have the base.** Restoring needs the base; if
+  it isn't on your machine it is downloaded too. The saving is largest when many fine-tunes
+  share one base you already have.
+- **Compress anything other than bf16.** fp16, fp32, int8 and other quantized tensors are stored
+  uncompressed. GGUF and other non-safetensors formats are not supported.
+- **Reduce memory or speed up inference.** It is a storage and transfer format, like zip.
+  Models are fully restored before loading. It is not quantization.
+- **Restore a model whose base has disappeared.** If the base is deleted from the Hub and you
+  have no copy, the fine-tune can't be restored.
+- **Prove where a file came from.** The hashes detect corruption and a wrong base. They are not
+  signatures: anyone can build a valid `.wdz` of a different model. Trust a packed model only as
+  much as you trust its source.
+- **Match zstd's speed.** Decoding runs at about 220–240 MB/s on 2 CPU cores, slower than
+  general-purpose decompressors that skip entropy modelling.
+
+Whole-model packing (`wdelta-model pack`) only handles `*.safetensors` files in the model's
+top-level folder. Files ending in `.bin`, `.pt` or `.pth` (for example `pytorch_model.bin`
+duplicates, or `training_args.bin`) and safetensors files in subfolders are **not** included in
+the packed model. Check the list of files in `wdelta.json` before deleting an original.
+
 ## How well it works
 
 Measured on real fine-tunes, compressed against the base model named on each model card.
@@ -43,6 +86,91 @@ byte-for-byte (SHA-256).
 All runs used a 2-vCPU machine; decode ran at about 220–240 MB/s on a typical 8B fine-tune.
 The scripts in `benchmarks/` reproduce every number.
 
+## What makes it different
+
+All delta compressors for fine-tunes rely on the same fact: fine-tuning moves most weights only
+a little, so a fine-tune is mostly predictable from its base. They differ in how they measure
+"a little" and how they encode it.
+
+| | Difference it encodes | How it encodes it |
+| --- | --- | --- |
+| BitX / ZipLLM | bitwise XOR of base and fine-tune | zstd (a general-purpose byte compressor) on two byte streams |
+| FM-Delta | integer difference (fpzip mapping) | range coder on the difference's bit length, low bits stored raw |
+| wdelta | integer difference, in steps between adjacent bf16 values | rANS entropy coder, statistics conditioned on the base weight's exponent |
+
+wdelta's gains come from three choices:
+
+1. **It measures change as a number, not as a bit pattern.** XOR is small only when the two
+   values share most of their bits. A weight that moves from 1.0 to 0.99609375, the very next
+   bf16 value below it, flips 8 of its 16 bits under XOR (`0x3F80 ^ 0x3F7F = 0x00FF`) because it
+   crosses a power of two. As an integer step it is simply −1. Fine-tuning moves millions of
+   weights across exponent boundaries, and XOR pays for every one of them.
+2. **It uses a coder built for this data.** zstd looks for repeated byte sequences, which
+   weight deltas rarely contain. wdelta instead counts how often each delta occurs and codes
+   each one with close to the minimum number of bits those counts allow (entropy coding with
+   rANS).
+3. **It conditions on the base weight.** The same numerical change is a different number of
+   steps depending on the weight's size: large weights have coarse steps, small weights fine
+   ones. wdelta keeps separate statistics for each base exponent, so deltas of small weights
+   and of large weights are each coded with their own probabilities. FM-Delta does not condition
+   on the base weight, and stores the low bits of each delta uncoded.
+
+How much each choice contributes varies by model; we have not published a per-step breakdown.
+The total effect is in the table above: 14–58% smaller than BitX (median 26%) and 9.5–30%
+smaller than FM-Delta on the models where both ran.
+
+## How it works
+
+A bf16 number is 16 bits: 1 sign bit, 8 exponent bits and 7 mantissa bits.
+
+**1. Map each weight to an ordered integer.** Each 16-bit pattern `u` is mapped to an integer
+`ord(u)` (0–65535) such that a larger float always gets a larger integer, and neighbouring
+bf16 values get neighbouring integers, including across zero and across powers of two. The
+mapping is one-to-one, so it is exactly reversible.
+
+**2. Take the difference.** For each weight, `d = ord(fine-tune) − ord(base)`: the number of
+bf16 steps the weight moved. Unchanged weights give 0; most changed weights give a small `d`.
+
+**3. Turn differences into symbols.** Each `d` becomes one of 55 symbols:
+
+- −15 to +15 each get their own symbol (31 symbols). These cover most weights.
+- Larger values get a symbol for their sign and bit length (24 symbols), followed by their
+  remaining low bits written as-is. Those bits are close to random, so modelling them gains
+  almost nothing.
+
+**4. Entropy-code the symbols, per base exponent.** Weights are processed in chunks of
+4,194,304. For each chunk, wdelta counts how often each symbol occurs for each base exponent
+and stores those counts as small tables (12-bit precision, only non-zero entries). It then
+codes every symbol with the table for its base weight's exponent, using rANS, an entropy coder
+that spends close to the theoretical minimum number of bits for those counts. Four rANS states
+are interleaved so the CPU can work on several symbols at once.
+
+Decoding reverses the steps. The decoder already has the base, so it knows which table to use
+for each weight before reading its symbol. Chunks are independent, so they are encoded and
+decoded in parallel on all cores.
+
+**Other record types.** Each tensor in a shard is stored one of four ways, whichever is
+smallest:
+
+- **Reference:** identical to the base tensor. Only its name and the base tensor's hash are
+  stored.
+- **Delta:** the coding above, for bf16 tensors whose base has the same name and size.
+- **Exponent:** for bf16 tensors with no usable base (new tensors, a resized vocabulary, or no
+  base at all). Exponents are entropy-coded (they carry most of the redundancy in trained
+  weights); the sign and mantissa bits are stored as-is. This gives the ~66.5% base-less
+  result.
+- **Raw:** everything else (non-bf16 tensors, small tensors, the file header).
+
+**The file.** A `.wdz` file holds the original safetensors header, one record per tensor, a
+128-bit xxh3 hash of each base tensor it depends on, and the SHA-256 of the original file. On
+decode, every base tensor is hashed and compared before use, and the restored file is checked
+against the SHA-256; any mismatch is an error and no output is left behind.
+
+**Measuring it honestly.** During development, gains were estimated as cross-entropies (model
+fitted on one part of a tensor, scored on another) so larger context tables could not look good
+by overfitting. The final numbers in this README are actual file sizes, every one restored and
+checked. `research/entropy_study.py` is the analysis script used for those estimates.
+
 ## Prior work
 
 wdelta does not introduce a new idea. It implements a known approach and measures it at
@@ -53,14 +181,16 @@ scale on today's bf16 models:
   that mapping to fine-tuned vs pre-trained weights.
 - **[ULPack](https://arxiv.org/abs/2610.14184)** (Ashok, NeurIPS 2026) codes order-preserving
   integer deltas with interleaved rANS conditioned on the reference weight's exponent.
-  wdelta's coder was developed independently and closely matches that design. We found no
-  public ULPack code, so it is not compared above.
+  wdelta's coder was developed independently and closely matches that design, so the
+  compression advantages above should be expected of ULPack too. We found no public ULPack
+  code, so it is not compared.
 - **[ZipLLM / BitX](https://github.com/ds2-lab/ZipLLM)** (Wang et al., NSDI 2026) codes the
   XOR of the two weights with zstd, and showed how much hub storage fine-tunes take.
 
-What wdelta adds: a fast, multithreaded implementation with bf16 support, a container that
-pins the exact base (commit and per-tensor hashes), automatic base download, and direct use
-with Hugging Face transformers.
+What wdelta adds is engineering rather than a new method: a fast, multithreaded, open
+implementation with bf16 support, a container that pins the exact base (commit and per-tensor
+hashes), automatic base download, direct use with Hugging Face transformers, and prebuilt
+binaries for macOS, Windows and Linux.
 
 ## Install
 
@@ -116,15 +246,6 @@ wrong or modified base is rejected instead of producing a different model. Gated
 - `*.safetensors.wdz`: one compressed file per weight shard
 - every non-weight file of the original (config, tokenizer, generation config, ...)
 - `wdelta.json`: the base model's repo id and commit, and the size and SHA-256 of each shard
-
-## Limitations
-
-- Only bf16 tensors are compressed. fp16 and fp32 tensors are currently stored uncompressed.
-- Restoring a fine-tune needs its base. If the base is deleted from the Hub, it cannot be fetched.
-- This is a storage and transfer format. Models are unpacked before loading, so it does not
-  reduce GPU memory during inference.
-- Tested on dense transformer LLMs (Qwen3, Mistral, Llama 3.1, 7B–70B). Mixture-of-experts,
-  vision and speech models are untested.
 
 ## Testing
 
