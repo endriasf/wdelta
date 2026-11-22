@@ -246,7 +246,8 @@ wrong or modified base is rejected instead of producing a different model. Gated
 ## What a packed model contains
 
 - `*.safetensors.wdz`: one compressed file per weight shard
-- every non-weight file of the original (config, tokenizer, generation config, ...)
+- the original's other files (config, tokenizer, generation config, ...), except `.bin`, `.pt`
+  and `.pth` files
 - `wdelta.json`: the base model's repo id and commit, and the size and SHA-256 of each shard
 
 ## Testing
