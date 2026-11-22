@@ -1,0 +1,78 @@
+name: release
+
+# Push a tag like v0.3.0 to publish a release. The full test suite runs on every
+# platform first; binaries are built and attached only if all of it passes.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    needs: tests
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-latest,   asset: macos-arm64,   exe: wdelta }
+          - { os: macos-15-intel, asset: macos-x86_64,  exe: wdelta }
+          - { os: windows-latest, asset: windows-x86_64, exe: wdelta.exe }
+          - { os: ubuntu-22.04,   asset: linux-x86_64,  exe: wdelta }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --locked
+      - name: Check the binary restores the golden file
+        run: |
+          python3 tests/golden_check.py "target/release/${{ matrix.exe }}" || python tests/golden_check.py "target/release/${{ matrix.exe }}"
+      - name: Package
+        run: |
+          name="wdelta-${GITHUB_REF_NAME}-${{ matrix.asset }}"
+          mkdir "$name"
+          cp "target/release/${{ matrix.exe }}" LICENSE NOTICE README.md "$name/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$name.zip" "$name" > /dev/null
+            echo "ARCHIVE=$name.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "$name.tar.gz" "$name"
+            echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ env.ARCHIVE }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "wdelta $GITHUB_REF_NAME" \
+            --prerelease \
+            --notes "Experimental release. The file format may change before 1.0.
+
+          Prebuilt \`wdelta\` command-line codec for macOS (Apple Silicon and Intel), Windows x64 and Linux x64. All tests passed on every platform before these were built. Verify downloads against SHA256SUMS.txt.
+
+          The Python package (whole-model pack/unpack, from_pretrained) installs from source; see the README."

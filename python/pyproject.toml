@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "wdelta"
 version = "0.3.0"
 description = "Lossless delta compression for fine-tuned models (safetensors)"
 requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 readme = "README.md"
 optional-dependencies = { hub = ["huggingface_hub>=0.20"] }
 

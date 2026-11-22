@@ -1,7 +1,10 @@
 [package]
 name = "wdelta"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
+description = "Lossless delta compression for fine-tuned model weights (safetensors)"
+license = "Apache-2.0"
+repository = "https://github.com/endriasf/wdelta"
 
 [dependencies]
 serde_json = "1.0.154"
