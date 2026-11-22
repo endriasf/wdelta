@@ -31,8 +31,8 @@ byte-for-byte.
 - **Help much without the right base.** Savings come from the base model. A model trained from
   scratch, or compared against the wrong base, gets the ~66.5% base-less result at best.
 - **Promise a fixed ratio.** The result depends on how far the fine-tune moved from its base:
-  5.3% for a light security fine-tune (MetaSecAlign), 53% for Mistral-7B-Instruct-v0.1. The more the training
-  changed the weights, the less there is to gain.
+  5.3% for a light security fine-tune (MetaSecAlign), 53% for
+  Mistral-7B-Instruct-v0.1. The more the training changed the weights, the less there is to gain.
 - **Make downloads smaller if you don't already have the base.** Restoring needs the base; if
   it isn't on your machine it is downloaded too. The saving is largest when many fine-tunes
   share one base you already have.
@@ -47,8 +47,8 @@ byte-for-byte.
   much as you trust its source.
 - **Vouch for untested model types.** Testing covered dense transformer LLMs (Qwen3, Mistral,
   Llama 3.1, 7B–70B). Mixture-of-experts, vision, speech and diffusion models are untested.
-- **Match zstd's speed.** Decoding runs at about 220–240 MB/s on 2 CPU cores, slower than
-  general-purpose decompressors that skip entropy modelling.
+- **Match zstd's speed.** Decoding runs at about 220–240 MB/s on 2 CPU cores, well below
+  general-purpose decompressors such as zstd, which typically decode at over 1 GB/s.
 
 Whole-model packing (`wdelta-model pack`) only handles `*.safetensors` files in the model's
 top-level folder. Files ending in `.bin`, `.pt` or `.pth` (for example `pytorch_model.bin`
