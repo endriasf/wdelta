@@ -153,6 +153,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
+      contents: read    # needed to check out the (private) repository
       id-token: write   # crates.io trusted publishing, once it is set up for the crate
     steps:
       - uses: actions/checkout@v4
